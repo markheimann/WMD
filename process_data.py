@@ -1,4 +1,4 @@
-import gensim, pdb, sys, scipy.io as io, numpy as np, pickle, string
+import gensim, pdb, sys, scipy.io as io, numpy as np, pickle, string, random
 
 # read datasets line by line
 def read_line_by_line(dataset_name,C,model,vec_size):
@@ -23,7 +23,7 @@ def read_line_by_line(dataset_name,C,model,vec_size):
 	remain = np.zeros((num_lines,), dtype=np.object)
 	the_words = np.zeros((num_lines,), dtype=np.object)
 	for line in f:
-		print '%d out of %d' % (count+1, num_lines)
+		#print '%d out of %d' % (count+1, num_lines)
 		line = line.strip()
 		line = line.translate(string.maketrans("",""), string.punctuation)
 		T = line.split('\t')
@@ -40,18 +40,20 @@ def read_line_by_line(dataset_name,C,model,vec_size):
 		
 		inner = 0
 		RC = np.zeros((len(W)-1,), dtype=np.object)
-		word_order = np.zeros((len(W)-1), dtype=np.object)
+		#word_order = np.zeros((len(W)-1), dtype=np.object)
+		word_order = np.empty((len(W) - 1), dtype=np.object)
+		word_order.fill('')
 		bow_x = np.zeros((len(W)-1,))
 		for word in W[1:len(W)]:
 			try:
 				test = model[word]
 				if word in stop:
-					word_order[inner] = ''
+					#word_order[inner] = ''
 					continue
 				if word in word_order:
 					IXW = np.where(word_order==word)
 					bow_x[IXW] += 1
-					word_order[inner] = ''
+					#word_order[inner] = ''
 				else:
 					word_order[inner] = word
 					bow_x[inner] += 1
@@ -65,10 +67,11 @@ def read_line_by_line(dataset_name,C,model,vec_size):
 		#Fs = F[~np.all(F == 0, axis=1)]
 		word_orders = word_order[word_order != '']
 		bow_xs = bow_x[bow_x != 0]
+		nbow_xs = normalize_bow(bow_xs) #Added by MH
 		X[count] = Fs.T
 		the_words[count] = word_orders
-		BOW_X[count] = bow_xs
-		count = count + 1;
+		BOW_X[count] = nbow_xs #bow_xs
+		count = count+ 1
 	return (X,BOW_X,y,C,the_words)
 
 def save_data(dataset,save_file_data,save_file_labels,model,vec_size):
@@ -81,12 +84,20 @@ def save_data(dataset,save_file_data,save_file_labels,model,vec_size):
 
 	with open(save_file_labels, 'w') as labels_file:
 		pickle.dump(y,labels_file)
+
+#Take a bag of words and normalize its entries so that they sum to 1
+def normalize_bow(bow):
+	return bow / float(np.sum(bow))
 	
 def main():
 	# 0. load word2vec model (trained on Google News)
 	#model = gensim.models.Word2Vec.load_word2vec_format('GoogleNews-vectors-negative300.bin', binary=True)
 	model = gensim.models.Word2Vec.load("GoogleNews_vectors")
 	vec_size = 300
+
+	#handle input argument errors
+	if len(sys.argv) != 3: #wrong number of arguments
+		print "Usage: python process_data.py [train_data_text_file] [test_data_text_file]"
 
 	# 1. specify train/test datasets
 	train_dataset = sys.argv[1] # e.g.: 'twitter.txt'
