@@ -3,13 +3,14 @@ import gensim, pdb, sys, scipy.io as io, numpy as np, pickle, string, random
 # read datasets line by line
 def read_line_by_line(dataset_name,C,model,vec_size):
 	# get stop words (except for twitter!)
-	SW = set()
+	#SW = set()
+	stop = set()
 	for line in open('stop_words.txt'):
 		line = line.strip()
 		if line != '':
-			SW.add(line)
-
-	stop = list(SW)
+			#SW.add(line)
+			stop.add(line)
+	#stop = list(SW)
 
 
 	f = open(dataset_name)

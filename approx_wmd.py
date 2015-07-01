@@ -1,10 +1,9 @@
-#start
-import pdb, sys, numpy as np, pickle, multiprocessing as mp
+import pdb, sys, numpy as np, pickle 
 from scipy.stats import mode
-#OPTIONAL: implement full WMD
+from emd import emd #for computing wmd distance using specialized emd solver
+
+#TODO: test prefetch and prune
 #TODO: figure out why accuracy varies so dramatically with different train/test splits
-#TODO: figure out why rwmd is a bit slow (see note in rwmd method) 
-#TODO: possibly try a simpler representation and sklearn kNN for comparison (see if it's the data or this method)
 
 def distance(x1,x2):
     return np.sqrt( np.sum((np.array(x1) - np.array(x2))**2) )
@@ -14,11 +13,14 @@ def getWordCentroid(document, nbow):
 	#basically sum columns multiplied by corresponding entries in normalized bag of words
 	return np.dot(document, nbow)
 
-#Compute the Word Centroid Distance
+#Compute the Word Centroid Distance: distance between word centroids of documents
 def wcd(doc1, doc2, doc1_nbow, doc2_nbow):
 	return distance(getWordCentroid(doc1, doc1_nbow), getWordCentroid(doc2, doc2_nbow))
 
 #Given a word and another document, find the word's nearest neighbor word vector in the other document
+#NOTE: for demo/experimentation purposes only: used to calculate rWMD with 1 constraint
+#to calculate rwmd as the max of relaxing either of the 2 constraints, use rWMD
+# (in practice this is basically as efficient and performs better)
 def find_wordNN(word, document):
 	#Keep track of nearest word (by its index in the document) and its distance to the word in question
 	nearest_neighbor = None
@@ -36,6 +38,9 @@ def find_wordNN(word, document):
 #Solution to WMD with 1 constraint (see Kusner et. al, 2015)
 #For each word in document 1, find its nearest neighbor in document 2
 #Transport all its weight (as given by its normalized bag-of-words entry) to that nearest neighbor
+#NOTE: for demo/experimentation purposes only: used to calculate rWMD with 1 constraint
+#to calculate rwmd as the max of relaxing either of the 2 constraints, use rWMD
+# (in practice this is basically as efficient and performs better)
 def lessConstrained_docDistance(doc1, doc2, doc1_nbow):
 	distance = 0
 	for word_index in range(0,doc1.shape[1]): 
@@ -48,8 +53,82 @@ def lessConstrained_docDistance(doc1, doc2, doc1_nbow):
 #(find nearest neighbors in document 2 of words in document 1 and vice versa)
 #take the maximum for a pretty tight bound on exact WMD, but faster (Kusner et. al, 2015)
 def rWMD(doc1, doc2, doc1_nbow, doc2_nbow):
-	#NOTE: this definitely duplicates some pairwise word vector distance calculations and can/should be made more efficient
-	return max(lessConstrained_docDistance(doc1, doc2, doc1_nbow), lessConstrained_docDistance(doc2, doc1, doc2_nbow))
+	doc1_numWords = doc1.shape[1] #recall that words are in columns
+	doc2_numWords = doc2.shape[1]
+	doc1_nearestDists = [float("Inf")] * doc1_numWords #keep track of nearest neighbors of each word in document 1
+	doc2_nearestDists = [float("Inf")] * doc2_numWords #keep track of nearest neighbors of each word in document 2
+	for word1_index in range(doc1_numWords):
+		word1 = doc1[:,word1_index]
+		for word2_index in range(doc2_numWords):
+			word2 = doc2[:,word2_index]
+			wdist = distance(word1,word2) #distance between the word vectors
+			#note: to compute rWMD we don't have to save the actual neighbors, just their distances
+			if wdist < doc1_nearestDists[word1_index]: #found a new nearest neighbor of word 1
+				doc1_nearestDists[word1_index] = wdist #save its distance as the new closest distance
+			if wdist < doc2_nearestDists[word2_index]: #same thing for wrod 2
+				doc2_nearestDists[word2_index] = wdist
+
+	#compute document distances based on relaxing each constraint (i.e. with each nearest-neighbor search)
+	#weight distance each word is from its nearest neighbor by the original word's occurrence weight
+	rwmd1 = np.sum(doc1_nearestDists * doc1_nbow) #weighted sum of pairwise product
+	rwmd2 = np.sum(doc2_nearestDists * doc2_nbow)
+	rwmd = max(rwmd1, rwmd2) #take max of 2 relaxations of the formal WMD problem (see Kusner et. al, 2015)
+	return rwmd 
+
+#Compute exact WMD between two documents
+def wmd(doc1, doc2, doc1_nbow, doc2_nbow):
+	return emd((doc1, doc1_nbow), (doc2, doc2_nbow), distance)
+
+#Prefetch and prune algorithm to approximate kNN search
+#Use heuristics such as wcd and rwmd to avoid computing (expensive) wmd distance to non-neighbors
+#num_NNcandidates specifies how many candidates to potentially compute more expensive rwmd or wmd distance to
+#The higher it is, the more provably accurate (but also slower) the method is
+#In practice, for many applications error decreases most around num_NNcandidates = 2*num_neighbors (Kusner et. al, 2015)
+def prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighbors, num_NNcandidates)
+	numTrain = len(train_data)
+	#num_NNcandidates must be at least the number of neighbors and at most the number of training documents
+	if num_NNcandidates < num_neighbors:
+		num_NNcandidates = num_neighbors
+	elif num_NNcandidates > numTrain:
+		num_NNcandidates = numTrain
+
+	#sort training documents by their WCD distance from query document (cheap to compute)
+	#implicitly sort them by sorting their indices
+	sorted_train_indices = range(numTrain)
+	sorted_train_indices.sort(key=lambda x: wcd(train_data[x], train_nbow[x], query_doc, query_nbow))
+
+	#keep track of tentative k nearest neighbors
+	nearest_neighbors = [None] * num_neighbors
+	nearest_distances = [float("inf")] * num_neighbors
+
+	#compute exact WMD distance to the first k of these (the tentative nearest neighbors)
+	#for the remaining documents (up to the number specified by num_NNcandidates):
+	#compute rwmd to training document
+	#only need to compute exact wmd if this is smaller than exact wmd of k-th nearest neighbor
+	for doc_index in range(num_NNcandidates):
+		sorted_doc_index = sorted_train_indices[doc_index] #which document index is in this order when sorted by WCD
+		train_doc_words = train_data[sorted_index] #the document (word vector representation) corresponding to that index
+		train_doc_nbow = train_nbow[sorted_index] #the document (normalized BOW representation) corresponding to that index
+		rwmd_dist = 0 #clearly less than infinity, the default nearest neighbors, so we'll replace the first k NN with their wmds
+		if doc_index >= num_neighbors: #when we want to try to prune with rwmd but still see if we need to calculate wmd
+			rwmd_dist = rwmd(train_doc_words, train_doc_nbow, query_doc, query_nbow)
+		if rwmd_dist < nearest_distances[0]: #either this is among the first k or it's a possible nearest neighbor
+			#calculate wmd and see if it's among the k closest discovered so far
+			neighbor_number = 0
+			wmd_dist = wmd(train_doc_words, train_doc_nbow, query_doc, query_nbow)
+			#insert each of the first 
+			while wmd_dist < nearest_distances[neighbor_number]:
+				neighbor_number += 1
+				if neighbor_number >= len(nearest_distances):
+					break
+			if neighbor_number > 0: #we found a new nearest neighbor
+				#insert it into the right place (so as to maintain sorted order among nearest neighbors)
+				nearest_distances.insert(neighbor_number, wmd_dist)
+				nearest_neighbors.insert(neighbor_number, doc_index)
+				#remove old kth-NN
+				nearest_neighbors.pop(0)
+				nearest_distances.pop(0)
+	return nearest_neighbors
 
 #Given a query document and a training set, return k nearest neighbors
 def kNN(query_doc, query_nbow, train_data, train_nbow, num_neighbors):
@@ -61,8 +140,8 @@ def kNN(query_doc, query_nbow, train_data, train_nbow, num_neighbors):
 	for train_doc_index in xrange(0,train_data.size):
 		train_doc = train_data[train_doc_index]
 		train_doc_nbow = train_nbow[train_doc_index]
-		dist = wcd(query_doc, train_doc, query_nbow, train_doc_nbow)
-		#dist = rWMD(query_doc, train_doc, query_nbow, train_doc_nbow)
+		#dist = wcd(query_doc, train_doc, query_nbow, train_doc_nbow)
+		dist = rWMD(query_doc, train_doc, query_nbow, train_doc_nbow)
 		nn_count = 0 #we'll be iterating over the list of nearest neighbors we have so far
 		while dist < nn_distances[nn_count]: #see if this distance is shorter than the distance to a nearest neighbor
 			nn_count += 1
@@ -79,7 +158,7 @@ def kNN(query_doc, query_nbow, train_data, train_nbow, num_neighbors):
 def testWithLabels(num_neighbors, train_data, test_data, train_nbow, test_nbow, train_labels, test_labels):
 	correct_preds = 0
 	num_preds = 0
-	num_test = 100
+	#num_test = 100
 	num_test = test_data.size
 	for query_index in xrange(0,num_test):
 		query_doc = test_data[query_index]
@@ -90,7 +169,7 @@ def testWithLabels(num_neighbors, train_data, test_data, train_nbow, test_nbow, 
 		if predicted_label == test_labels[query_index]:
 			correct_preds += 1
 		num_preds += 1
-		if True: #num_preds % 10 == 0: #print out every 10th
+		if num_preds % 20 == 0: #print out every so often
 			print("Made %d of %d predictions" % (num_preds, num_test)),
 			if num_preds % 100 == 0: #print accuracy every 100th time
 				print( "with accuracy %f" % (float(correct_preds) / num_preds))
@@ -111,6 +190,7 @@ if __name__ == "__main__":
 	#Load in train data now
 	with open(train_data_file,"r") as tdf:
 		[train_data, train_nbow, CTr, wordsTr] = pickle.load(tdf)
+			
 	if len(sys.argv) == 6: #user has provided labels
 		train_labels_file = sys.argv[4]
 		test_labels_file = sys.argv[5]
@@ -122,9 +202,10 @@ if __name__ == "__main__":
 		#since we have labels, we know that test data is a collection of documents
 		with open(test_data_file, "r") as tedf:
 			[test_data, test_nbow, CTe, wordsTe] = pickle.load(tedf)
+		
 		test_accuracy = testWithLabels(num_neighbors, train_data, test_data, train_nbow, test_nbow, train_labels, test_labels)   
 		print "Test accuracy: ", test_accuracy
-
+		
 	elif len(sys.argv) == 4: #user hasn't provided labels
 		#so now we know test data is a single document
 		with open(test_data_file, "r") as tedf:
