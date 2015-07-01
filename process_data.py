@@ -68,11 +68,15 @@ def read_line_by_line(dataset_name,C,model,vec_size):
 		#Fs = F[~np.all(F == 0, axis=1)]
 		word_orders = word_order[word_order != '']
 		bow_xs = bow_x[bow_x != 0]
+#		if len(bow_xs) > 0: #there is at least one word in the document
 		nbow_xs = normalize_bow(bow_xs) #Added by MH
 		X[count] = Fs.T
 		the_words[count] = word_orders
 		BOW_X[count] = nbow_xs #bow_xs
-		count = count+ 1
+		count = count + 1
+#		else:
+#			print "empty document (must have only been stop words)"
+#	print "number of nonempty documents: ", count
 	return (X,BOW_X,y,C,the_words)
 
 def save_data(dataset,save_file_data,save_file_labels,model,vec_size):

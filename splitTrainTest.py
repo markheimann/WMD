@@ -1,4 +1,7 @@
 import sys, random
+#WARNING: if you use this to split into train and test and use process_data.py to preprocess,
+#the label numbers may get mixed up since the order the labels appear in the test set
+#is probably different from the order they appear in the training set
 
 filePath = sys.argv[1]
 randomize = True #by default we randomly shuffle data

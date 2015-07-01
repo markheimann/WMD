@@ -2,12 +2,13 @@ import pdb, sys, numpy as np, pickle
 sys.path.append('python-emd-master') #for importing specialized emd (earth mover's distance) solver
 from scipy.stats import mode
 from emd import emd #for computing wmd distance using specialized emd solver
-
+import math, random
 #NOTE: emd solver does not work on OS X.  It does, however, work on Ubuntu. 
 #If on OS X, comment out emd import and usage and do not use WMD (use heuristic such as rWMD)
 #(or just run it on a virtual machine...)
 
-#TODO: figure out why accuracy varies so dramatically with different train/test splits
+#TODO: debug occasional query document formatting errors in prefetch-and-prune
+#TODO: figure out why accuracy is stable when splitting after preprocessing and unstable before
 
 def distance(x1,x2):
     return np.sqrt( np.sum((np.array(x1) - np.array(x2))**2) )
@@ -18,7 +19,7 @@ def getWordCentroid(document, nbow):
 	return np.dot(document, nbow)
 
 #Compute the Word Centroid Distance: distance between word centroids of documents
-def wcd(doc1, doc2, doc1_nbow, doc2_nbow):
+def wcd(doc1, doc1_nbow, doc2, doc2_nbow):
 	return distance(getWordCentroid(doc1, doc1_nbow), getWordCentroid(doc2, doc2_nbow))
 
 #Given a word and another document, find the word's nearest neighbor word vector in the other document
@@ -83,7 +84,8 @@ def rWMD(doc1, doc1_nbow, doc2, doc2_nbow):
 def wmd(doc1, doc1_nbow, doc2, doc2_nbow):
 	doc1 = doc1.T #for converting to list and feeding to EMD solver
 	doc2 = doc2.T
-	return emd((doc1.tolist(), doc1_nbow.tolist()), (doc2.tolist(), doc2_nbow.tolist()), distance)
+	wmd_dist = emd((doc1.tolist(), doc1_nbow.tolist()), (doc2.tolist(), doc2_nbow.tolist()), distance)
+	return wmd_dist
 
 #Prefetch and prune algorithm to approximate kNN search
 #Use heuristics such as wcd and rwmd to avoid computing (expensive) wmd distance to non-neighbors
@@ -101,7 +103,7 @@ def prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighb
 	#sort training documents by their WCD distance from query document (cheap to compute)
 	#implicitly sort them by sorting their indices
 	sorted_train_indices = range(numTrain)
-	sorted_train_indices.sort(key=lambda x: wcd(train_data[x], query_doc, train_nbow[x], query_nbow))
+	sorted_train_indices.sort(key=lambda x: wcd(train_data[x], train_nbow[x], query_doc, query_nbow))
 
 	#keep track of tentative k nearest neighbors
 	nearest_neighbors = [None] * num_neighbors
@@ -146,8 +148,8 @@ def kNN(query_doc, query_nbow, train_data, train_nbow, num_neighbors):
 	for train_doc_index in xrange(0,train_data.size):
 		train_doc = train_data[train_doc_index]
 		train_doc_nbow = train_nbow[train_doc_index]
-		#dist = wcd(query_doc, train_doc, query_nbow, train_doc_nbow)
-		dist = rWMD(query_doc, query_nbow, train_doc, train_doc_nbow)
+		dist = wcd(query_doc, query_nbow, train_doc, train_doc_nbow)
+		#dist = rWMD(query_doc, query_nbow, train_doc, train_doc_nbow)
 		nn_count = 0 #we'll be iterating over the list of nearest neighbors we have so far
 		while dist < nn_distances[nn_count]: #see if this distance is shorter than the distance to a nearest neighbor
 			nn_count += 1
@@ -164,11 +166,16 @@ def kNN(query_doc, query_nbow, train_data, train_nbow, num_neighbors):
 def testWithLabels(num_neighbors, train_data, test_data, train_nbow, test_nbow, train_labels, test_labels):
 	correct_preds = 0
 	num_preds = 0
-	num_train = len(train_data)
+	num_train = train_data.size
+	num_neighbors = min(num_neighbors, num_train) #can't request more neighbors than there are
 	num_test = 100
 	#num_test = test_data.size
 	for query_index in xrange(0,num_test):
 		query_doc = test_data[query_index]
+		#documents can be empty if they contain only stopwords (we need to handle this, at least on the test end)
+		if query_doc.shape[1] == 0: #empty document
+			num_test -= 1 #don't count this document, and don't try to predict it (that's meaningless)
+			continue
 		query_nbow = test_nbow[query_index]
 		#query_NN = kNN(query_doc,query_nbow,train_data,train_nbow,num_neighbors)
 		query_NN = prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighbors, 4*num_neighbors)
@@ -186,10 +193,37 @@ def testWithLabels(num_neighbors, train_data, test_data, train_nbow, test_nbow, 
 	accuracy = float(correct_preds) / num_test
 	return accuracy
 
-
+#If user wants to provide a big dump of data and split it into train and test here (instead of passing in a pre-defined split)
+#Split randomly 80% train, 20% test
+def splitTrainTest(data, nbow, labels):
+	numData = data.shape[0]
+	train_proportion = 0.8
+	trainTest_order = range(numData)
+	random.shuffle(trainTest_order) #actual indices of data/bow/labels are now in random order (take first 80% as train, rest as test)
+	numTrain = int(train_proportion * numData)
+	train_indices = trainTest_order[:numTrain]
+	test_indices = trainTest_order[numTrain:]
+	train_data = data[train_indices] 
+	train_nbow = nbow[train_indices]
+	train_labels = labels[train_indices]
+	#remove empty documents from training (can be caught at preprocessing time "in the wild")
+	nonempty = []
+	for bow_index in range(train_nbow.size):
+		if train_nbow[bow_index].size > 0: #document is nonempty
+			nonempty.append(bow_index)
+	nonempty_indices = np.asarray(nonempty)
+	train_data = train_data[nonempty_indices]
+	train_nbow = train_nbow[nonempty_indices]
+	train_labels = train_labels[nonempty_indices]
+	test_data = data[test_indices]
+	test_nbow = nbow[test_indices]
+	test_labels = labels[test_indices]
+	return train_data, train_nbow, train_labels, test_data, test_nbow, test_labels
+	
 if __name__ == "__main__":
 	#User arguments: train_data_file test_data_file num_neighbors  <optional train labels> <optional test labels>
 	#If user provides train and test labels then they want to compute accuracy on a set of documents
+
 	#If user doesn't provide train and test labels then they want to get the nearest neighbors of a single query
 	train_data_file = sys.argv[1]
 	test_data_file = sys.argv[2]
@@ -198,7 +232,17 @@ if __name__ == "__main__":
 	#Load in train data now
 	with open(train_data_file,"r") as tdf:
 		[train_data, train_nbow, CTr, wordsTr] = pickle.load(tdf)
-			
+
+	if sys.argv[2] == "SPLIT": #user wants to split into training and test sets (and must have provided labels since they want to test)
+		all_labels_file = sys.argv[4]
+		with open(all_labels_file, "r") as alllf:
+			all_labels = pickle.load(alllf)
+		#recall we read in the "train" data already but it was actually all the data
+		train_data, train_nbow, train_labels, test_data, test_nbow, test_labels = splitTrainTest(train_data, train_nbow, all_labels)
+		test_accuracy = testWithLabels(num_neighbors, train_data, test_data, train_nbow, test_nbow, train_labels, test_labels)   
+		print "Test accuracy: ", test_accuracy
+		print
+		
 	if len(sys.argv) == 6: #user has provided labels
 		train_labels_file = sys.argv[4]
 		test_labels_file = sys.argv[5]
@@ -213,7 +257,8 @@ if __name__ == "__main__":
 		
 		test_accuracy = testWithLabels(num_neighbors, train_data, test_data, train_nbow, test_nbow, train_labels, test_labels)   
 		print "Test accuracy: ", test_accuracy
-		
+		print
+
 	elif len(sys.argv) == 4: #user hasn't provided labels
 		#so now we know test data is a single document
 		with open(test_data_file, "r") as tedf:
@@ -221,6 +266,6 @@ if __name__ == "__main__":
 		recommendations = kNN(test_data, test_nbow, train_data, train_nbow, num_neighbors)
 		print "We recommend the following documents: ", recommendations
 
-	else: #rudimentary input error handling
+	elif not sys.argv[2] == "SPLIT": #rudimentary input error handling
 		print "Usage: python approx_wmd.py [train_data_vectors] [test_data_vectors] [num_neighbors]"
 		print "Optional: add [train_data_labels] [test_data_labels] for testing at the end"
