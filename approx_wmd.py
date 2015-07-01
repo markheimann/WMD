@@ -1,8 +1,12 @@
 import pdb, sys, numpy as np, pickle 
+sys.path.append('python-emd-master') #for importing specialized emd (earth mover's distance) solver
 from scipy.stats import mode
 from emd import emd #for computing wmd distance using specialized emd solver
 
-#TODO: test prefetch and prune
+#NOTE: emd solver does not work on OS X.  It does, however, work on Ubuntu. 
+#If on OS X, comment out emd import and usage and do not use WMD (use heuristic such as rWMD)
+#(or just run it on a virtual machine...)
+
 #TODO: figure out why accuracy varies so dramatically with different train/test splits
 
 def distance(x1,x2):
@@ -52,7 +56,7 @@ def lessConstrained_docDistance(doc1, doc2, doc1_nbow):
 #Perform nearest neighbor search in both directions
 #(find nearest neighbors in document 2 of words in document 1 and vice versa)
 #take the maximum for a pretty tight bound on exact WMD, but faster (Kusner et. al, 2015)
-def rWMD(doc1, doc2, doc1_nbow, doc2_nbow):
+def rWMD(doc1, doc1_nbow, doc2, doc2_nbow):
 	doc1_numWords = doc1.shape[1] #recall that words are in columns
 	doc2_numWords = doc2.shape[1]
 	doc1_nearestDists = [float("Inf")] * doc1_numWords #keep track of nearest neighbors of each word in document 1
@@ -76,15 +80,17 @@ def rWMD(doc1, doc2, doc1_nbow, doc2_nbow):
 	return rwmd 
 
 #Compute exact WMD between two documents
-def wmd(doc1, doc2, doc1_nbow, doc2_nbow):
-	return emd((doc1, doc1_nbow), (doc2, doc2_nbow), distance)
+def wmd(doc1, doc1_nbow, doc2, doc2_nbow):
+	doc1 = doc1.T #for converting to list and feeding to EMD solver
+	doc2 = doc2.T
+	return emd((doc1.tolist(), doc1_nbow.tolist()), (doc2.tolist(), doc2_nbow.tolist()), distance)
 
 #Prefetch and prune algorithm to approximate kNN search
 #Use heuristics such as wcd and rwmd to avoid computing (expensive) wmd distance to non-neighbors
 #num_NNcandidates specifies how many candidates to potentially compute more expensive rwmd or wmd distance to
 #The higher it is, the more provably accurate (but also slower) the method is
 #In practice, for many applications error decreases most around num_NNcandidates = 2*num_neighbors (Kusner et. al, 2015)
-def prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighbors, num_NNcandidates)
+def prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighbors, num_NNcandidates):
 	numTrain = len(train_data)
 	#num_NNcandidates must be at least the number of neighbors and at most the number of training documents
 	if num_NNcandidates < num_neighbors:
@@ -95,7 +101,7 @@ def prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighb
 	#sort training documents by their WCD distance from query document (cheap to compute)
 	#implicitly sort them by sorting their indices
 	sorted_train_indices = range(numTrain)
-	sorted_train_indices.sort(key=lambda x: wcd(train_data[x], train_nbow[x], query_doc, query_nbow))
+	sorted_train_indices.sort(key=lambda x: wcd(train_data[x], query_doc, train_nbow[x], query_nbow))
 
 	#keep track of tentative k nearest neighbors
 	nearest_neighbors = [None] * num_neighbors
@@ -106,12 +112,12 @@ def prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighb
 	#compute rwmd to training document
 	#only need to compute exact wmd if this is smaller than exact wmd of k-th nearest neighbor
 	for doc_index in range(num_NNcandidates):
-		sorted_doc_index = sorted_train_indices[doc_index] #which document index is in this order when sorted by WCD
-		train_doc_words = train_data[sorted_index] #the document (word vector representation) corresponding to that index
-		train_doc_nbow = train_nbow[sorted_index] #the document (normalized BOW representation) corresponding to that index
+		sorted_doc_index = sorted_train_indices[doc_index] #actual document index (not just its order when sorted by WCD)
+		train_doc_words = train_data[sorted_doc_index] #the document (word vector representation) corresponding to that index
+		train_doc_nbow = train_nbow[sorted_doc_index] #the document (normalized BOW representation) corresponding to that index
 		rwmd_dist = 0 #clearly less than infinity, the default nearest neighbors, so we'll replace the first k NN with their wmds
 		if doc_index >= num_neighbors: #when we want to try to prune with rwmd but still see if we need to calculate wmd
-			rwmd_dist = rwmd(train_doc_words, train_doc_nbow, query_doc, query_nbow)
+			rwmd_dist = rWMD(train_doc_words, train_doc_nbow, query_doc, query_nbow)
 		if rwmd_dist < nearest_distances[0]: #either this is among the first k or it's a possible nearest neighbor
 			#calculate wmd and see if it's among the k closest discovered so far
 			neighbor_number = 0
@@ -124,7 +130,7 @@ def prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighb
 			if neighbor_number > 0: #we found a new nearest neighbor
 				#insert it into the right place (so as to maintain sorted order among nearest neighbors)
 				nearest_distances.insert(neighbor_number, wmd_dist)
-				nearest_neighbors.insert(neighbor_number, doc_index)
+				nearest_neighbors.insert(neighbor_number, sorted_doc_index)
 				#remove old kth-NN
 				nearest_neighbors.pop(0)
 				nearest_distances.pop(0)
@@ -141,7 +147,7 @@ def kNN(query_doc, query_nbow, train_data, train_nbow, num_neighbors):
 		train_doc = train_data[train_doc_index]
 		train_doc_nbow = train_nbow[train_doc_index]
 		#dist = wcd(query_doc, train_doc, query_nbow, train_doc_nbow)
-		dist = rWMD(query_doc, train_doc, query_nbow, train_doc_nbow)
+		dist = rWMD(query_doc, query_nbow, train_doc, train_doc_nbow)
 		nn_count = 0 #we'll be iterating over the list of nearest neighbors we have so far
 		while dist < nn_distances[nn_count]: #see if this distance is shorter than the distance to a nearest neighbor
 			nn_count += 1
@@ -158,12 +164,14 @@ def kNN(query_doc, query_nbow, train_data, train_nbow, num_neighbors):
 def testWithLabels(num_neighbors, train_data, test_data, train_nbow, test_nbow, train_labels, test_labels):
 	correct_preds = 0
 	num_preds = 0
-	#num_test = 100
-	num_test = test_data.size
+	num_train = len(train_data)
+	num_test = 100
+	#num_test = test_data.size
 	for query_index in xrange(0,num_test):
 		query_doc = test_data[query_index]
 		query_nbow = test_nbow[query_index]
-		query_NN = kNN(query_doc,query_nbow,train_data,train_nbow,num_neighbors)
+		#query_NN = kNN(query_doc,query_nbow,train_data,train_nbow,num_neighbors)
+		query_NN = prefetch_and_prune(query_doc, query_nbow, train_data, train_nbow, num_neighbors, 4*num_neighbors)
 		NN_labels = train_labels[query_NN]
 		predicted_label = mode(NN_labels)[0][0] #get modal value
 		if predicted_label == test_labels[query_index]:
