@@ -1,6 +1,10 @@
 from scipy.stats import ttest_ind
 import numpy as np
 
+#NOTE: there are other differences (e.g. empty documents and words not in word2vec embedding are removed with WMD)
+#To be fully rigorous, should run more experience and equalize these differences
+#This simple test is hopefully still sufficiently convincing
+
 #Read in data from file: each float is on its own line
 #Return numpy array with data
 def readFloats(fileName):
